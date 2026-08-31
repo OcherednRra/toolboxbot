@@ -12,7 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY robloxbox ./robloxbox
 COPY scripts ./scripts
 
-# На Railway сюда монтируется volume, иначе очередь теряется при передеплое.
-VOLUME ["/data"]
+# Каталог для SQLite. На Railway поверх него монтируется volume — своя
+# директива VOLUME здесь не нужна и мешает платформе.
+RUN mkdir -p /data
 
 CMD ["python", "-m", "robloxbox"]
