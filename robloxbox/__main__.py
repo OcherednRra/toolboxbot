@@ -34,8 +34,10 @@ async def amain() -> None:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-    # aiogram на INFO слишком болтлив про каждый апдейт.
+    # aiogram на INFO слишком болтлив про каждый апдейт, а httpx печатает
+    # URL целиком — запрос превьюшек на 50 ассетов занимает пол-экрана.
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     cfg = load_settings()
     if not cfg.api_key:

@@ -113,7 +113,10 @@ class ToolboxClient:
 
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Запрос с обновлением CSRF и бэкоффом на 429/5xx."""
-        needs_csrf = method in ("POST", "DELETE", "PATCH")
+        # CSRF нужен только безключевым запросам. С API-ключом Roblox токена не
+        # требует и в ответ его не кладёт, так что попытка его добыть просто
+        # удваивала количество запросов: лишний 400 перед каждым POST.
+        needs_csrf = method in ("POST", "DELETE", "PATCH") and not self._api_key
         if needs_csrf and not self._csrf:
             await self._refresh_csrf()
 
