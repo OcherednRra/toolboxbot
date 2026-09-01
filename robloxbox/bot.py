@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 from datetime import datetime
 
@@ -70,6 +71,60 @@ def _fmt_votes(up: int, down: int, percent: int) -> str:
     return f"{face} {pct}% ({up}↑ {down}↓)"
 
 
+def _fmt_count(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K".replace(".0K", "K")
+    return str(n)
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def _fmt_tech(raw: str) -> str:
+    """Строка техсводки. Скрипты выносим вперёд: бесплатные модели со
+    скриптами — классический способ занести в игру чужой код."""
+    try:
+        tech = json.loads(raw or "{}")
+    except ValueError:
+        return ""
+    if not tech:
+        return ""
+
+    parts: list[str] = []
+    scripts = tech.get("script_count", 0)
+    if scripts:
+        parts.append(f"⚠️ {scripts} {_plural(scripts, 'скрипт', 'скрипта', 'скриптов')}")
+    elif tech.get("has_scripts"):
+        parts.append("⚠️ есть скрипты")
+    else:
+        parts.append("✅ без скриптов")
+
+    if tech.get("triangles"):
+        parts.append(f"🔺 {_fmt_count(tech['triangles'])} трис")
+
+    inner = [
+        f"{_fmt_count(tech[key])} {_plural(tech[key], *forms)}"
+        for key, forms in (
+            ("meshPart", ("меш", "меша", "мешей")),
+            ("audio", ("аудио", "аудио", "аудио")),
+            ("decal", ("текстура", "текстуры", "текстур")),
+            ("animation", ("анимация", "анимации", "анимаций")),
+            ("tool", ("инструмент", "инструмента", "инструментов")),
+        )
+        if tech.get(key)
+    ]
+    if inner:
+        parts.append("🧩 " + ", ".join(inner))
+    return " · ".join(parts)
+
+
 def _clean_description(raw: str) -> str:
     """Схлопывает пустые строки: в описаниях их бывает по десятку подряд."""
     lines = [line.strip() for line in (raw or "").splitlines()]
@@ -86,13 +141,17 @@ def _caption(row: aiosqlite.Row, limit: int = CAPTION_LIMIT) -> str:
     creator = html.escape(row["creator"])
     label = C.CATEGORY_LABELS.get(row["category"], row["category"])
 
-    head = (
-        f"<b>{name}</b>\n"
-        f"{label} · 👤 {creator}\n"
-        f"{_fmt_votes(row['up_votes'], row['down_votes'], row['up_vote_percent'])}\n"
-        f"{_fmt_price(row['price'], row['currency'])} · 📅 {_fmt_date(row['create_time'])}\n"
-        f"<code>{row['asset_id']}</code>"
-    )
+    lines = [
+        f"<b>{name}</b>",
+        f"{label} · 👤 {creator}",
+        _fmt_votes(row["up_votes"], row["down_votes"], row["up_vote_percent"]),
+        f"{_fmt_price(row['price'], row['currency'])} · 📅 {_fmt_date(row['create_time'])}",
+    ]
+    tech = _fmt_tech(row["tech"])
+    if tech:
+        lines.append(tech)
+    lines.append(f"<code>{row['asset_id']}</code>")
+    head = "\n".join(lines)
 
     description = _clean_description(row["description"])
     if not description:
@@ -179,7 +238,9 @@ async def cmd_help(message: Message) -> None:
 
 
 @router.message(Command("next"))
-async def cmd_next(message: Message, db: Database, cfg: Settings, bot: Bot) -> None:
+async def cmd_next(
+    message: Message, db: Database, cfg: Settings, bot: Bot, client: ToolboxClient
+) -> None:
     max_age = int(await db.get_setting("max_age_days", str(cfg.max_age_days)) or 0)
     rows = await db.take_batch(cfg.batch_size, max_age_days=max_age)
 
@@ -198,6 +259,13 @@ async def cmd_next(message: Message, db: Database, cfg: Settings, bot: Bot) -> N
         return
 
     for row in rows:
+        # Техсводку и полное описание надёжно отдаёт только детальная ручка;
+        # обновляем строку и перечитываем её, чтобы карточка была полной.
+        detail = await client.get_asset(row["asset_id"], row["category"])
+        if detail is not None:
+            await db.enrich_item(detail)
+            row = await db.get_item(row["asset_id"]) or row
+
         try:
             await _send_card(bot, message.chat.id, row)
         except TelegramRetryAfter as exc:

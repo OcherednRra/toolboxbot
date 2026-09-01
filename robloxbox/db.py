@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS items (
     up_votes        INTEGER NOT NULL DEFAULT 0,
     down_votes      INTEGER NOT NULL DEFAULT 0,
     up_vote_percent INTEGER NOT NULL DEFAULT 0,
+    tech            TEXT NOT NULL DEFAULT '{}',
     thumb_url       TEXT,
     discovered_at   TEXT NOT NULL,
     status          TEXT NOT NULL DEFAULT 'new'
@@ -67,6 +69,7 @@ class Database:
         ("description", "TEXT NOT NULL DEFAULT ''"),
         ("down_votes", "INTEGER NOT NULL DEFAULT 0"),
         ("up_vote_percent", "INTEGER NOT NULL DEFAULT 0"),
+        ("tech", "TEXT NOT NULL DEFAULT '{}'"),
     )
 
     async def _migrate(self) -> None:
@@ -114,6 +117,7 @@ class Database:
                 a.up_votes,
                 a.down_votes,
                 a.up_vote_percent,
+                json.dumps(a.tech),
                 now,
             )
             for a in assets
@@ -122,8 +126,8 @@ class Database:
             """INSERT OR IGNORE INTO items
                (asset_id, category, name, creator, description, create_time, update_time,
                 price, currency, category_path, up_votes, down_votes, up_vote_percent,
-                discovered_at, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'new')""",
+                tech, discovered_at, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'new')""",
             rows,
         )
         await self.conn.commit()
@@ -135,6 +139,24 @@ class Database:
         await self.conn.executemany(
             "UPDATE items SET thumb_url = ? WHERE asset_id = ?",
             [(url, asset_id) for asset_id, url in thumbs.items()],
+        )
+        await self.conn.commit()
+
+    async def enrich_item(self, asset: Asset) -> None:
+        """Обновляет карточку данными детальной ручки: техсводка и описание
+        там есть всегда, в выдаче поиска — не для каждого ассета."""
+        await self.conn.execute(
+            """UPDATE items SET description = ?, tech = ?, up_votes = ?,
+                   down_votes = ?, up_vote_percent = ?
+               WHERE asset_id = ?""",
+            (
+                asset.description[:2000],
+                json.dumps(asset.tech),
+                asset.up_votes,
+                asset.down_votes,
+                asset.up_vote_percent,
+                asset.asset_id,
+            ),
         )
         await self.conn.commit()
 

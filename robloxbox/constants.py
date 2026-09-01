@@ -6,6 +6,7 @@ Roblox их не документирует, поэтому всё ниже пр
 
 TOOLBOX_BASE = "https://apis.roblox.com"
 SEARCH_PATH = "/toolbox-service/v2/assets:search"
+ASSET_PATH = "/toolbox-service/v2/assets"
 SAVES_PATH = "/toolbox-service/v1/saves"
 CATEGORIES_PATH = "/toolbox-service/v1/categories"
 THUMBNAILS_URL = "https://thumbnails.roblox.com/v1/assets"

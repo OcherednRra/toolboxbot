@@ -47,6 +47,8 @@ class Asset:
     up_votes: int
     down_votes: int
     up_vote_percent: int
+    # Техсводка ассета: скрипты, полигоны, состав. Ключи см. в _parse_tech.
+    tech: dict
 
     @property
     def vote_count(self) -> int:
@@ -186,6 +188,24 @@ class ToolboxClient:
         ]
         return [a for a in assets if a is not None], data.get("nextPageToken")
 
+    async def get_asset(self, asset_id: int, category: str = "Model") -> Asset | None:
+        """Полная карточка ассета по id: техсводка и описание тут всегда есть,
+        в выдаче поиска — через раз. Авторизации не требует."""
+        try:
+            resp = await self._request(
+                "GET", f"{C.TOOLBOX_BASE}{C.ASSET_PATH}/{asset_id}"
+            )
+        except (httpx.HTTPError, OSError) as exc:
+            log.info("детали ассета %s не пришли: %s", asset_id, exc)
+            return None
+        if resp.status_code != 200:
+            log.info("детали ассета %s: HTTP %s", asset_id, resp.status_code)
+            return None
+        try:
+            return _parse_asset(resp.json(), fallback_category=category)
+        except ValueError:
+            return None
+
     async def category_paths(self) -> list[str]:
         """Полное дерево категорий. Требует API-ключ; без него — фолбэк-список."""
         if not self._api_key:
@@ -316,7 +336,29 @@ def _parse_asset(entry: dict, fallback_category: str) -> Asset | None:
         up_vote_percent=int(voting.get("upVotePercent") or 0)
         if (voting.get("upVotes") or voting.get("downVotes"))
         else 0,
+        tech=_parse_tech(asset),
     )
+
+
+def _parse_tech(asset: dict) -> dict:
+    """Техсводка: скрипты, полигоны, состав.
+
+    Поиск отдаёт эти поля не для всех ассетов, детальная ручка — всегда,
+    поэтому карточка перед отправкой дозапрашивает ассет по id.
+    """
+    mesh = asset.get("objectMeshSummary") or {}
+    counts = asset.get("instanceCounts") or {}
+    tech = {
+        "has_scripts": bool(asset.get("hasScripts")),
+        "script_count": int(asset.get("scriptCount") or 0),
+        "triangles": int(mesh.get("triangles") or 0),
+        "vertices": int(mesh.get("vertices") or 0),
+    }
+    for key in ("meshPart", "audio", "decal", "animation", "tool"):
+        value = int(counts.get(key) or 0)
+        if value:
+            tech[key] = value
+    return tech
 
 
 def _collect_paths(node: object, acc: set[str] | None = None) -> set[str]:
