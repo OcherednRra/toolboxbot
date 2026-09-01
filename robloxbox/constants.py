@@ -10,6 +10,9 @@ ASSET_PATH = "/toolbox-service/v2/assets"
 SAVES_PATH = "/toolbox-service/v1/saves"
 CATEGORIES_PATH = "/toolbox-service/v1/categories"
 THUMBNAILS_URL = "https://thumbnails.roblox.com/v1/assets"
+# Отдаёт подписанную ссылку на файл. Для аудио работает без авторизации,
+# для моделей — нет: там 401, содержимое .rbxm только под сессией аккаунта.
+ASSET_DELIVERY_URL = "https://assetdelivery.roblox.com/v2/assetId"
 STORE_URL = "https://create.roblox.com/store/asset/{asset_id}"
 
 # Валидные searchCategoryType. Остальные варианты (Models, Image, Mesh, Font,

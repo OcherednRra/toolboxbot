@@ -271,6 +271,47 @@ class ToolboxClient:
             raise RobloxError(f"список закладок вернул {resp.status_code}")
         return resp.json().get("saves", [])
 
+    # ----------------------------------------------------------------- аудио
+
+    async def audio_bytes(self, asset_id: int, max_bytes: int = 20 * 1024 * 1024) -> bytes | None:
+        """Само аудио, чтобы отправить его в телеграм.
+
+        assetdelivery отдаёт подписанную ссылку на CDN и для аудио не требует
+        авторизации (для моделей — требует, там 401). Файл приходит в Ogg
+        Vorbis; телеграм принимает такой и играет как голосовое.
+        """
+        try:
+            meta = await self._client.get(f"{C.ASSET_DELIVERY_URL}/{asset_id}")
+            if meta.status_code != 200:
+                log.info("ссылка на аудио %s: HTTP %s", asset_id, meta.status_code)
+                return None
+            locations = meta.json().get("locations") or []
+            url = next((loc.get("location") for loc in locations if loc.get("location")), None)
+            if not url:
+                return None
+
+            # Ходим голым клиентом: rbxcdn — чужой хост, и наш x-api-key
+            # ему знать незачем. Ссылка уже подписана.
+            async with self._client.stream("GET", url) as resp:
+                if resp.status_code != 200:
+                    return None
+                declared = int(resp.headers.get("content-length") or 0)
+                if declared > max_bytes:
+                    log.info("аудио %s слишком большое: %d байт", asset_id, declared)
+                    return None
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        log.info("аудио %s переросло лимит на лету", asset_id)
+                        return None
+                    chunks.append(chunk)
+            return b"".join(chunks)
+        except (httpx.HTTPError, ValueError, OSError) as exc:
+            log.info("аудио %s не скачалось: %s", asset_id, exc)
+            return None
+
     # ------------------------------------------------------------- превьюшки
 
     async def thumbnails(self, asset_ids: list[int]) -> dict[int, str]:
@@ -358,6 +399,18 @@ def _parse_tech(asset: dict) -> dict:
         value = int(counts.get(key) or 0)
         if value:
             tech[key] = value
+
+    # У аудио своя пачка полей — они и в плеере телеграма пригодятся.
+    for src, dst in (
+        ("durationSeconds", "duration"),
+        ("artist", "artist"),
+        ("album", "album"),
+        ("genre", "genre"),
+        ("audioType", "audio_type"),
+    ):
+        value = asset.get(src)
+        if value:
+            tech[dst] = value
     return tech
 
 

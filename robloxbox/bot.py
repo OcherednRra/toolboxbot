@@ -6,6 +6,7 @@ import asyncio
 import html
 import json
 import logging
+import re
 from datetime import datetime
 
 import aiosqlite
@@ -13,6 +14,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -44,10 +46,13 @@ HELP = """<b>Что умею</b>
 /help — это сообщение
 
 Под каждой карточкой:
-🔖 — ассет уходит в <b>Saved</b> твоего аккаунта Roblox и сразу виден
-в Studio → Toolbox → Saved
-⏭ — карточка удаляется из чата и сразу прилетает следующая
-🧠 — разбор от Claude, если задан ключ"""
+🔖 — ассет уходит в <b>Saved</b> твоего аккаунта Roblox (виден в
+Studio → Toolbox → Saved), карточка остаётся в чате для истории,
+и сразу прилетает следующая
+⏭ — карточка удаляется из чата, прилетает следующая
+🧠 — разбор от Claude, если задан ключ
+
+Аудио приходит файлом — играется прямо в чате."""
 
 
 def _fmt_price(price: float, currency: str) -> str:
@@ -91,7 +96,11 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return many
 
 
-def _fmt_tech(raw: str) -> str:
+def _fmt_duration(seconds: int) -> str:
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _fmt_tech(raw: str, category: str = "") -> str:
     """Строка техсводки. Скрипты выносим вперёд: бесплатные модели со
     скриптами — классический способ занести в игру чужой код."""
     try:
@@ -100,6 +109,21 @@ def _fmt_tech(raw: str) -> str:
         return ""
     if not tech:
         return ""
+
+    # У аудио скрипты и полигоны бессмысленны — показываем то, что о нём
+    # действительно говорит.
+    if category == "Audio":
+        audio_parts: list[str] = []
+        if tech.get("duration"):
+            audio_parts.append(f"⏱ {_fmt_duration(int(tech['duration']))}")
+        if tech.get("artist"):
+            audio_parts.append(f"🎤 {html.escape(str(tech['artist']))[:60]}")
+        kind = " / ".join(
+            str(tech[key]) for key in ("audio_type", "genre") if tech.get(key)
+        )
+        if kind:
+            audio_parts.append(f"🎵 {html.escape(kind)[:40]}")
+        return " · ".join(audio_parts)
 
     parts: list[str] = []
     scripts = tech.get("script_count", 0)
@@ -151,7 +175,7 @@ def _caption(row: aiosqlite.Row, limit: int = CAPTION_LIMIT) -> str:
         _fmt_votes(row["up_votes"], row["down_votes"], row["up_vote_percent"]),
         f"{_fmt_price(row['price'], row['currency'])} · 📅 {_fmt_date(row['create_time'])}",
     ]
-    tech = _fmt_tech(row["tech"])
+    tech = _fmt_tech(row["tech"], row["category"])
     if tech:
         lines.append(tech)
     lines.append(f"<code>{row['asset_id']}</code>")
@@ -202,11 +226,61 @@ def _done_keyboard(asset_id: int, text: str, with_analysis: bool = True) -> Inli
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _audio_filename(name: str) -> str:
+    """Имя видно в плеере, поэтому чистим только то, что ломает загрузку."""
+    safe = re.sub(r'[\\/:*?"<>|\r\n]+', " ", name).strip() or "audio"
+    return f"{safe[:60]}.ogg"
+
+
+async def _send_audio_card(
+    bot: Bot,
+    chat_id: int,
+    row: aiosqlite.Row,
+    keyboard: InlineKeyboardMarkup,
+    client: ToolboxClient,
+) -> bool:
+    """Отправляет аудио файлом. False — не вышло, зовите обычную карточку."""
+    data = await client.audio_bytes(row["asset_id"])
+    if not data:
+        return False
+
+    try:
+        tech = json.loads(row["tech"] or "{}")
+    except ValueError:
+        tech = {}
+
+    try:
+        await bot.send_audio(
+            chat_id,
+            audio=BufferedInputFile(data, filename=_audio_filename(row["name"])),
+            caption=_caption(row, CAPTION_LIMIT),
+            reply_markup=keyboard,
+            duration=int(tech.get("duration") or 0) or None,
+            title=row["name"][:64],
+            performer=str(tech.get("artist") or row["creator"])[:64],
+        )
+        return True
+    except TelegramRetryAfter:
+        raise
+    except TelegramBadRequest as exc:
+        log.info("аудио %s не отправилось (%s), шлю текстом", row["asset_id"], exc)
+        return False
+
+
 async def _send_card(
-    bot: Bot, chat_id: int, row: aiosqlite.Row, with_analysis: bool = True
+    bot: Bot,
+    chat_id: int,
+    row: aiosqlite.Row,
+    with_analysis: bool = True,
+    client: ToolboxClient | None = None,
 ) -> None:
     keyboard = _keyboard(row["asset_id"], with_analysis)
     thumb = row["thumb_url"]
+
+    # Аудио отправляем самим файлом — телеграм играет его прямо в чате.
+    if row["category"] == "Audio" and client is not None:
+        if await _send_audio_card(bot, chat_id, row, keyboard, client):
+            return
 
     if thumb:
         try:
@@ -279,10 +353,10 @@ async def deliver_next(
             row = await db.get_item(row["asset_id"]) or row
 
         try:
-            await _send_card(bot, chat_id, row, analyst.enabled)
+            await _send_card(bot, chat_id, row, analyst.enabled, client)
         except TelegramRetryAfter as exc:
             await asyncio.sleep(exc.retry_after)
-            await _send_card(bot, chat_id, row, analyst.enabled)
+            await _send_card(bot, chat_id, row, analyst.enabled, client)
         await asyncio.sleep(SEND_DELAY)
 
     return len(rows)
@@ -302,7 +376,12 @@ async def cmd_next(
 
 @router.callback_query(F.data.startswith("save:"))
 async def cb_save(
-    callback: CallbackQuery, db: Database, client: ToolboxClient, analyst: Analyst
+    callback: CallbackQuery,
+    db: Database,
+    cfg: Settings,
+    bot: Bot,
+    client: ToolboxClient,
+    analyst: Analyst,
 ) -> None:
     asset_id = int(callback.data.split(":", 1)[1])
     row = await db.get_item(asset_id)
@@ -311,17 +390,21 @@ async def cb_save(
     try:
         await client.save_asset(asset_id, category)
     except RobloxError as exc:
+        # Следующую карточку не шлём: пусть остаётся на этой и попробует ещё раз.
         await callback.answer(f"⚠️ {exc}", show_alert=True)
         return
 
     await db.set_status(asset_id, STATUS_SAVED)
     await callback.answer("🔖 Сохранено — ищи в Studio → Toolbox → Saved")
+    # Карточку оставляем в чате: сохранённое должно остаться в истории.
     try:
         await callback.message.edit_reply_markup(
             reply_markup=_done_keyboard(asset_id, "✅ В закладках", analyst.enabled)
         )
     except TelegramBadRequest:
         pass
+
+    await deliver_next(bot, callback.message.chat.id, db, cfg, client, analyst)
 
 
 @router.callback_query(F.data.startswith("skip:"))
