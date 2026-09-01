@@ -43,8 +43,11 @@ HELP = """<b>Что умею</b>
 /saved — последние сохранённые
 /help — это сообщение
 
-Под каждой карточкой кнопка 🔖 — ассет уходит в <b>Saved</b>
-твоего аккаунта Roblox и сразу виден в Studio → Toolbox → Saved."""
+Под каждой карточкой:
+🔖 — ассет уходит в <b>Saved</b> твоего аккаунта Roblox и сразу виден
+в Studio → Toolbox → Saved
+⏭ — карточка удаляется из чата и сразу прилетает следующая
+🧠 — разбор от Claude, если задан ключ"""
 
 
 def _fmt_price(price: float, currency: str) -> str:
@@ -178,7 +181,7 @@ def _keyboard(asset_id: int, with_analysis: bool = True) -> InlineKeyboardMarkup
     rows = [
         [
             InlineKeyboardButton(text="🔖 В закладки", callback_data=f"save:{asset_id}"),
-            InlineKeyboardButton(text="⏭ Пропуск", callback_data=f"skip:{asset_id}"),
+            InlineKeyboardButton(text="⏭ Дальше", callback_data=f"skip:{asset_id}"),
         ]
     ]
     if with_analysis:
@@ -240,15 +243,15 @@ async def cmd_help(message: Message) -> None:
     await message.answer(HELP)
 
 
-@router.message(Command("next"))
-async def cmd_next(
-    message: Message,
+async def deliver_next(
+    bot: Bot,
+    chat_id: int,
     db: Database,
     cfg: Settings,
-    bot: Bot,
     client: ToolboxClient,
     analyst: Analyst,
-) -> None:
+) -> int:
+    """Отправляет очередную порцию карточек. Общий путь для /next и кнопки ⏭."""
     max_age = int(await db.get_setting("max_age_days", str(cfg.max_age_days)) or 0)
     rows = await db.take_batch(cfg.batch_size, max_age_days=max_age)
 
@@ -260,11 +263,12 @@ async def cmd_next(
                 f"\n\nВ очереди {stats['queue']} шт., но все старше {max_age} дн. "
                 "Ослабь фильтр: /fresh 0"
             )
-        await message.answer(
+        await bot.send_message(
+            chat_id,
             f"Пока пусто — сборщик добирает новое, следующий проход через "
-            f"{cfg.poll_interval_min} мин.{hint}"
+            f"{cfg.poll_interval_min} мин.{hint}",
         )
-        return
+        return 0
 
     for row in rows:
         # Техсводку и полное описание надёжно отдаёт только детальная ручка;
@@ -275,11 +279,25 @@ async def cmd_next(
             row = await db.get_item(row["asset_id"]) or row
 
         try:
-            await _send_card(bot, message.chat.id, row, analyst.enabled)
+            await _send_card(bot, chat_id, row, analyst.enabled)
         except TelegramRetryAfter as exc:
             await asyncio.sleep(exc.retry_after)
-            await _send_card(bot, message.chat.id, row, analyst.enabled)
+            await _send_card(bot, chat_id, row, analyst.enabled)
         await asyncio.sleep(SEND_DELAY)
+
+    return len(rows)
+
+
+@router.message(Command("next"))
+async def cmd_next(
+    message: Message,
+    db: Database,
+    cfg: Settings,
+    bot: Bot,
+    client: ToolboxClient,
+    analyst: Analyst,
+) -> None:
+    await deliver_next(bot, message.chat.id, db, cfg, client, analyst)
 
 
 @router.callback_query(F.data.startswith("save:"))
@@ -307,16 +325,32 @@ async def cb_save(
 
 
 @router.callback_query(F.data.startswith("skip:"))
-async def cb_skip(callback: CallbackQuery, db: Database, analyst: Analyst) -> None:
+async def cb_skip(
+    callback: CallbackQuery,
+    db: Database,
+    cfg: Settings,
+    bot: Bot,
+    client: ToolboxClient,
+    analyst: Analyst,
+) -> None:
     asset_id = int(callback.data.split(":", 1)[1])
     await db.set_status(asset_id, STATUS_SKIPPED)
     await callback.answer("⏭")
+
     try:
-        await callback.message.edit_reply_markup(
-            reply_markup=_done_keyboard(asset_id, "⏭ Пропущено", analyst.enabled)
-        )
-    except TelegramBadRequest:
-        pass
+        await callback.message.delete()
+    except TelegramBadRequest as exc:
+        # Своё сообщение бот может удалить только первые 48 часов. Дальше
+        # карточка остаётся в чате — гасим у неё кнопки, чтобы не мозолила.
+        log.info("карточку %s удалить не вышло (%s), гашу кнопки", asset_id, exc)
+        try:
+            await callback.message.edit_reply_markup(
+                reply_markup=_done_keyboard(asset_id, "⏭ Пропущено", analyst.enabled)
+            )
+        except TelegramBadRequest:
+            pass
+
+    await deliver_next(bot, callback.message.chat.id, db, cfg, client, analyst)
 
 
 @router.callback_query(F.data.startswith("ai:"))
