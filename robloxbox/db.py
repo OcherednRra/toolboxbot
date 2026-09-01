@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS items (
     down_votes      INTEGER NOT NULL DEFAULT 0,
     up_vote_percent INTEGER NOT NULL DEFAULT 0,
     tech            TEXT NOT NULL DEFAULT '{}',
+    analysis        TEXT,
     thumb_url       TEXT,
     discovered_at   TEXT NOT NULL,
     status          TEXT NOT NULL DEFAULT 'new'
@@ -70,6 +71,7 @@ class Database:
         ("down_votes", "INTEGER NOT NULL DEFAULT 0"),
         ("up_vote_percent", "INTEGER NOT NULL DEFAULT 0"),
         ("tech", "TEXT NOT NULL DEFAULT '{}'"),
+        ("analysis", "TEXT"),
     )
 
     async def _migrate(self) -> None:
@@ -157,6 +159,14 @@ class Database:
                 asset.up_vote_percent,
                 asset.asset_id,
             ),
+        )
+        await self.conn.commit()
+
+    async def set_analysis(self, asset_id: int, text: str) -> None:
+        """Разбор кешируется: повторное нажатие кнопки не должно снова
+        оплачиваться запросом к модели."""
+        await self.conn.execute(
+            "UPDATE items SET analysis = ? WHERE asset_id = ?", (text, asset_id)
         )
         await self.conn.commit()
 

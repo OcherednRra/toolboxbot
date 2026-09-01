@@ -20,6 +20,7 @@ from aiogram.types import (
 )
 
 from . import constants as C
+from .analysis import AnalysisError, Analyst
 from .config import Settings
 from .db import STATUS_SAVED, STATUS_SKIPPED, Database
 from .roblox import RobloxError, ToolboxClient
@@ -167,39 +168,41 @@ def _caption(row: aiosqlite.Row, limit: int = CAPTION_LIMIT) -> str:
     return f"{head}\n\n{escaped}"
 
 
-def _keyboard(asset_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔖 В закладки", callback_data=f"save:{asset_id}"),
-                InlineKeyboardButton(text="⏭ Пропуск", callback_data=f"skip:{asset_id}"),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔗 Открыть в Creator Store",
-                    url=C.STORE_URL.format(asset_id=asset_id),
-                )
-            ],
-        ]
+def _open_button(asset_id: int) -> InlineKeyboardButton:
+    return InlineKeyboardButton(
+        text="🔗 Открыть в Creator Store", url=C.STORE_URL.format(asset_id=asset_id)
     )
 
 
-def _done_keyboard(asset_id: int, text: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=text, callback_data="noop")],
-            [
-                InlineKeyboardButton(
-                    text="🔗 Открыть в Creator Store",
-                    url=C.STORE_URL.format(asset_id=asset_id),
-                )
-            ],
+def _keyboard(asset_id: int, with_analysis: bool = True) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(text="🔖 В закладки", callback_data=f"save:{asset_id}"),
+            InlineKeyboardButton(text="⏭ Пропуск", callback_data=f"skip:{asset_id}"),
         ]
-    )
+    ]
+    if with_analysis:
+        rows.append(
+            [InlineKeyboardButton(text="🧠 Разбор", callback_data=f"ai:{asset_id}")]
+        )
+    rows.append([_open_button(asset_id)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _send_card(bot: Bot, chat_id: int, row: aiosqlite.Row) -> None:
-    keyboard = _keyboard(row["asset_id"])
+def _done_keyboard(asset_id: int, text: str, with_analysis: bool = True) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=text, callback_data="noop")]]
+    if with_analysis:
+        rows.append(
+            [InlineKeyboardButton(text="🧠 Разбор", callback_data=f"ai:{asset_id}")]
+        )
+    rows.append([_open_button(asset_id)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _send_card(
+    bot: Bot, chat_id: int, row: aiosqlite.Row, with_analysis: bool = True
+) -> None:
+    keyboard = _keyboard(row["asset_id"], with_analysis)
     thumb = row["thumb_url"]
 
     if thumb:
@@ -239,7 +242,12 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(Command("next"))
 async def cmd_next(
-    message: Message, db: Database, cfg: Settings, bot: Bot, client: ToolboxClient
+    message: Message,
+    db: Database,
+    cfg: Settings,
+    bot: Bot,
+    client: ToolboxClient,
+    analyst: Analyst,
 ) -> None:
     max_age = int(await db.get_setting("max_age_days", str(cfg.max_age_days)) or 0)
     rows = await db.take_batch(cfg.batch_size, max_age_days=max_age)
@@ -267,15 +275,17 @@ async def cmd_next(
             row = await db.get_item(row["asset_id"]) or row
 
         try:
-            await _send_card(bot, message.chat.id, row)
+            await _send_card(bot, message.chat.id, row, analyst.enabled)
         except TelegramRetryAfter as exc:
             await asyncio.sleep(exc.retry_after)
-            await _send_card(bot, message.chat.id, row)
+            await _send_card(bot, message.chat.id, row, analyst.enabled)
         await asyncio.sleep(SEND_DELAY)
 
 
 @router.callback_query(F.data.startswith("save:"))
-async def cb_save(callback: CallbackQuery, db: Database, client: ToolboxClient) -> None:
+async def cb_save(
+    callback: CallbackQuery, db: Database, client: ToolboxClient, analyst: Analyst
+) -> None:
     asset_id = int(callback.data.split(":", 1)[1])
     row = await db.get_item(asset_id)
     category = row["category"] if row else "Model"
@@ -290,23 +300,72 @@ async def cb_save(callback: CallbackQuery, db: Database, client: ToolboxClient) 
     await callback.answer("🔖 Сохранено — ищи в Studio → Toolbox → Saved")
     try:
         await callback.message.edit_reply_markup(
-            reply_markup=_done_keyboard(asset_id, "✅ В закладках")
+            reply_markup=_done_keyboard(asset_id, "✅ В закладках", analyst.enabled)
         )
     except TelegramBadRequest:
         pass
 
 
 @router.callback_query(F.data.startswith("skip:"))
-async def cb_skip(callback: CallbackQuery, db: Database) -> None:
+async def cb_skip(callback: CallbackQuery, db: Database, analyst: Analyst) -> None:
     asset_id = int(callback.data.split(":", 1)[1])
     await db.set_status(asset_id, STATUS_SKIPPED)
     await callback.answer("⏭")
     try:
         await callback.message.edit_reply_markup(
-            reply_markup=_done_keyboard(asset_id, "⏭ Пропущено")
+            reply_markup=_done_keyboard(asset_id, "⏭ Пропущено", analyst.enabled)
         )
     except TelegramBadRequest:
         pass
+
+
+@router.callback_query(F.data.startswith("ai:"))
+async def cb_analyze(
+    callback: CallbackQuery, db: Database, client: ToolboxClient, analyst: Analyst
+) -> None:
+    asset_id = int(callback.data.split(":", 1)[1])
+    row = await db.get_item(asset_id)
+    if row is None:
+        await callback.answer("⚠️ ассет пропал из базы", show_alert=True)
+        return
+
+    # Готовый разбор отдаём из базы: повторный клик не должен стоить денег.
+    if row["analysis"]:
+        await callback.answer()
+        await _reply_analysis(callback, row["analysis"], cached=True)
+        return
+
+    if not analyst.enabled:
+        await callback.answer(
+            "⚠️ не задан ANTHROPIC_API_KEY — разбор недоступен", show_alert=True
+        )
+        return
+
+    await callback.answer("🧠 разбираю, это займёт секунд десять")
+    try:
+        # Разбор опирается на описание и техсводку, а они полны только после
+        # детальной ручки — на всякий случай дотягиваем перед запросом.
+        detail = await client.get_asset(asset_id, row["category"])
+        if detail is not None:
+            await db.enrich_item(detail)
+            row = await db.get_item(asset_id) or row
+        text = await analyst.analyze(row)
+    except AnalysisError as exc:
+        await _reply_analysis(callback, f"⚠️ разбор не вышел: {exc}")
+        return
+    except Exception:
+        log.exception("разбор ассета %s упал", asset_id)
+        await _reply_analysis(callback, "⚠️ разбор не вышел: внутренняя ошибка")
+        return
+
+    await db.set_analysis(asset_id, text)
+    await _reply_analysis(callback, text)
+
+
+async def _reply_analysis(callback: CallbackQuery, text: str, cached: bool = False) -> None:
+    head = "🧠 <b>Разбор</b>" + (" <i>(из кеша)</i>" if cached else "")
+    body = html.escape(text)[: MESSAGE_LIMIT - len(head) - 20]
+    await callback.message.reply(f"{head}\n\n{body}", disable_web_page_preview=True)
 
 
 @router.callback_query(F.data == "noop")
@@ -418,7 +477,9 @@ async def cmd_saved(message: Message, db: Database) -> None:
     )
 
 
-def build_dispatcher(cfg: Settings, db: Database, client: ToolboxClient) -> Dispatcher:
+def build_dispatcher(
+    cfg: Settings, db: Database, client: ToolboxClient, analyst: Analyst
+) -> Dispatcher:
     dispatcher = Dispatcher()
     # Бот приватный: отвечаем только в разрешённом чате.
     if cfg.chat_id:
@@ -443,4 +504,5 @@ def build_dispatcher(cfg: Settings, db: Database, client: ToolboxClient) -> Disp
     dispatcher["db"] = db
     dispatcher["client"] = client
     dispatcher["cfg"] = cfg
+    dispatcher["analyst"] = analyst
     return dispatcher

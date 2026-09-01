@@ -33,6 +33,8 @@ class Settings:
     batch_size: int
     max_queue: int
     max_age_days: int
+    anthropic_key: str = ""
+    analysis_effort: str = "medium"
     categories: tuple[str, ...] = field(default=SEARCH_CATEGORIES)
 
     @property
@@ -67,5 +69,7 @@ def load_settings() -> Settings:
         max_queue=max(50, _int("MAX_QUEUE", 2000)),
         # 0 = не фильтровать по возрасту.
         max_age_days=max(0, _int("MAX_AGE_DAYS", 0)),
+        anthropic_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
+        analysis_effort=os.getenv("ANALYSIS_EFFORT", "medium").strip().lower() or "medium",
         categories=cats,
     )

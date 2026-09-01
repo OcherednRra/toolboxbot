@@ -10,6 +10,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
+from .analysis import Analyst
 from .bot import build_dispatcher
 from .config import load_settings
 from .db import Database
@@ -47,8 +48,12 @@ async def amain() -> None:
     await db.connect()
 
     client = ToolboxClient(cfg.api_key)
+    analyst = Analyst(cfg.anthropic_key, cfg.analysis_effort)
+    if not analyst.enabled:
+        log.warning("ANTHROPIC_API_KEY пуст — кнопка разбора показываться не будет")
+
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dispatcher = build_dispatcher(cfg, db, client)
+    dispatcher = build_dispatcher(cfg, db, client, analyst)
 
     harvester = asyncio.create_task(poller_loop(cfg, db, client), name="poller")
 
@@ -56,7 +61,7 @@ async def amain() -> None:
         await bot.set_my_commands(COMMANDS)
         me = await bot.get_me()
         log.info("бот @%s поднялся, опрос каждые %d мин.", me.username, cfg.poll_interval_min)
-        await dispatcher.start_polling(bot, db=db, client=client, cfg=cfg)
+        await dispatcher.start_polling(bot, db=db, client=client, cfg=cfg, analyst=analyst)
     finally:
         harvester.cancel()
         try:
@@ -64,6 +69,7 @@ async def amain() -> None:
         except asyncio.CancelledError:
             pass
         await client.aclose()
+        await analyst.aclose()
         await db.close()
         await bot.session.close()
 
