@@ -36,6 +36,14 @@ SEND_DELAY = 0.4
 CAPTION_LIMIT = 1024
 MESSAGE_LIMIT = 4096
 
+# Roblox отдаёт аудиофайл без авторизации только для партнёрских лейблов
+# (Distrokid, APM и подобные). Всё, что залили пользователи, отвечает 401 —
+# и с Open Cloud API-ключом тоже. Послушать такое можно только на странице.
+AUDIO_LOCKED = (
+    "\n\n🔇 <i>Послушать здесь не выйдет: Roblox отдаёт файл только для музыки "
+    "партнёрских лейблов. Открой страницу ассета кнопкой ниже.</i>"
+)
+
 HELP = """<b>Что умею</b>
 
 /next — следующий ассет (сначала самые свежие)
@@ -278,9 +286,18 @@ async def _send_card(
     thumb = row["thumb_url"]
 
     # Аудио отправляем самим файлом — телеграм играет его прямо в чате.
-    if row["category"] == "Audio" and client is not None:
-        if await _send_audio_card(bot, chat_id, row, keyboard, client):
+    if row["category"] == "Audio":
+        if client is not None and await _send_audio_card(bot, chat_id, row, keyboard, client):
             return
+        # Файл не отдали. Превьюшка у аудио — дежурная иконка, толку от неё
+        # никакого, поэтому уходим текстом и честно говорим почему.
+        await bot.send_message(
+            chat_id,
+            _caption(row, MESSAGE_LIMIT - len(AUDIO_LOCKED) - 4) + AUDIO_LOCKED,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+        return
 
     if thumb:
         try:

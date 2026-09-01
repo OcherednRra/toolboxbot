@@ -248,8 +248,12 @@ class Database:
         return await cursor.fetchone()
 
     async def missing_thumbnails(self, limit: int = 100) -> list[int]:
+        # Аудио пропускаем: у него превью — дежурная иконка, а карточка аудио
+        # картинку всё равно не показывает. Заодно меньше упираемся в 429
+        # на thumbnails-ручке.
         cursor = await self.conn.execute(
-            "SELECT asset_id FROM items WHERE status = 'new' AND thumb_url IS NULL LIMIT ?",
+            "SELECT asset_id FROM items "
+            "WHERE status = 'new' AND thumb_url IS NULL AND category != 'Audio' LIMIT ?",
             (limit,),
         )
         return [row["asset_id"] for row in await cursor.fetchall()]
