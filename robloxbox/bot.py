@@ -332,7 +332,12 @@ async def cb_analyze(
     # Готовый разбор отдаём из базы: повторный клик не должен стоить денег.
     if row["analysis"]:
         await callback.answer()
-        await _reply_analysis(callback, row["analysis"], cached=True)
+        total = await db.spend_summary()
+        await _reply_analysis(
+            callback,
+            row["analysis"],
+            footer=f"♻️ из кеша, повторно платить не пришлось · всего потрачено {_usd(total['usd'])}",
+        )
         return
 
     if not analyst.enabled:
@@ -349,8 +354,10 @@ async def cb_analyze(
         if detail is not None:
             await db.enrich_item(detail)
             row = await db.get_item(asset_id) or row
-        text = await analyst.analyze(row)
+        result = await analyst.analyze(row)
     except AnalysisError as exc:
+        # Ответ мог прийти и быть оплачен — учитываем даже неудачу.
+        await db.add_spend(exc.spend.usd, exc.spend.total_tokens, counted=False)
         await _reply_analysis(callback, f"⚠️ разбор не вышел: {exc}")
         return
     except Exception:
@@ -358,14 +365,38 @@ async def cb_analyze(
         await _reply_analysis(callback, "⚠️ разбор не вышел: внутренняя ошибка")
         return
 
-    await db.set_analysis(asset_id, text)
-    await _reply_analysis(callback, text)
+    spend = result.spend
+    await db.set_analysis(asset_id, result.text, spend.usd)
+    await db.add_spend(spend.usd, spend.total_tokens)
+
+    total = await db.spend_summary()
+    fetched = f" · 🔗 {spend.fetches} переходов по ссылкам" if spend.fetches else ""
+    await _reply_analysis(
+        callback,
+        result.text,
+        footer=(
+            f"💸 {_usd(spend.usd)} за этот разбор "
+            f"({spend.input_tokens}→{spend.output_tokens} токенов){fetched}\n"
+            f"Всего на разборы: {_usd(total['usd'])} за {total['calls']} шт."
+        ),
+    )
 
 
-async def _reply_analysis(callback: CallbackQuery, text: str, cached: bool = False) -> None:
-    head = "🧠 <b>Разбор</b>" + (" <i>(из кеша)</i>" if cached else "")
-    body = html.escape(text)[: MESSAGE_LIMIT - len(head) - 20]
-    await callback.message.reply(f"{head}\n\n{body}", disable_web_page_preview=True)
+def _usd(amount: float) -> str:
+    """Разбор стоит центы, поэтому мельчить приходится сильнее обычного."""
+    if amount <= 0:
+        return "$0"
+    if amount < 0.1:
+        return f"${amount:.4f}"
+    return f"${amount:.2f}"
+
+
+async def _reply_analysis(callback: CallbackQuery, text: str, footer: str = "") -> None:
+    head = "🧠 <b>Разбор</b>"
+    tail = f"\n\n<i>{html.escape(footer)}</i>" if footer else ""
+    budget = MESSAGE_LIMIT - len(head) - len(tail) - 8
+    body = html.escape(text)[:budget]
+    await callback.message.reply(f"{head}\n\n{body}{tail}", disable_web_page_preview=True)
 
 
 @router.callback_query(F.data == "noop")
@@ -374,16 +405,29 @@ async def cb_noop(callback: CallbackQuery) -> None:
 
 
 @router.message(Command("stats"))
-async def cmd_stats(message: Message, db: Database, cfg: Settings) -> None:
+async def cmd_stats(message: Message, db: Database, cfg: Settings, analyst: Analyst) -> None:
     stats = await db.stats()
     max_age = int(await db.get_setting("max_age_days", str(cfg.max_age_days)) or 0)
     age_line = f"{max_age} дн." if max_age else "выключен"
+
+    spend_block = ""
+    if analyst.enabled or (await db.spend_summary())["calls"]:
+        spend = await db.spend_summary()
+        average = spend["usd"] / spend["calls"] if spend["calls"] else 0.0
+        spend_block = (
+            f"\n🧠 разборов: <b>{spend['calls']}</b>\n"
+            f"💸 потрачено: <b>{_usd(spend['usd'])}</b>"
+            + (f" · в среднем {_usd(average)} за разбор" if spend["calls"] else "")
+            + f"\n🔢 токенов: {spend['tokens']:,}".replace(",", " ")
+        )
+
     await message.answer(
         f"📥 в очереди: <b>{stats['queue']}</b>\n"
         f"👀 показано: {stats['shown']}\n"
         f"🔖 сохранено: <b>{stats['saved']}</b>\n"
         f"⏭ пропущено: {stats['skipped']}\n"
-        f"— всего в базе: {stats['total']}\n\n"
+        f"— всего в базе: {stats['total']}\n"
+        f"{spend_block}\n\n"
         f"Фильтр по возрасту: {age_line}\n"
         f"За один /next: {cfg.batch_size} · опрос каждые {cfg.poll_interval_min} мин."
     )

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime
 
 import anthropic
@@ -25,6 +26,17 @@ log = logging.getLogger(__name__)
 
 MODEL = "claude-opus-5"
 MAX_TOKENS = 8000
+
+# Цены Claude Opus 5, долларов за миллион токенов.
+# web_fetch отдельно не тарифицируется — платим только за токены скачанного,
+# они приходят обычным input_tokens. Кеш мы не используем, но считаем и его:
+# если появится, цифра останется честной.
+PRICE_PER_MTOK = {
+    "input": 5.00,
+    "output": 25.00,
+    "cache_write": 6.25,  # запись на 5 минут
+    "cache_read": 0.50,
+}
 # Разбор запускается на каждый интересный ассет, поэтому глубина размышлений
 # выкручена не на максимум. Меняется переменной ANALYSIS_EFFORT.
 DEFAULT_EFFORT = "medium"
@@ -77,8 +89,61 @@ def extract_roblox_links(text: str, limit: int = 5) -> list[str]:
     return seen
 
 
+@dataclass(slots=True)
+class Spend:
+    """Что израсходовал один разбор."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+    fetches: int = 0
+
+    def add(self, usage) -> None:
+        """Суммирует usage очередного ответа. При pause_turn их несколько."""
+        self.input_tokens += usage.input_tokens or 0
+        self.output_tokens += usage.output_tokens or 0
+        self.cache_write_tokens += getattr(usage, "cache_creation_input_tokens", 0) or 0
+        self.cache_read_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
+        server = getattr(usage, "server_tool_use", None)
+        if server is not None:
+            self.fetches += getattr(server, "web_fetch_requests", 0) or 0
+
+    @property
+    def usd(self) -> float:
+        return (
+            self.input_tokens * PRICE_PER_MTOK["input"]
+            + self.output_tokens * PRICE_PER_MTOK["output"]
+            + self.cache_write_tokens * PRICE_PER_MTOK["cache_write"]
+            + self.cache_read_tokens * PRICE_PER_MTOK["cache_read"]
+        ) / 1_000_000
+
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_write_tokens
+            + self.cache_read_tokens
+        )
+
+
+@dataclass(slots=True)
+class AnalysisResult:
+    text: str
+    spend: Spend
+
+
 class AnalysisError(RuntimeError):
-    """Ошибка разбора, пригодная для показа пользователю."""
+    """Ошибка разбора, пригодная для показа пользователю.
+
+    Несёт израсходованное: ответ мог прийти и быть оплачен, а споткнуться мы
+    могли уже после — такие токены всё равно должны попасть в счётчик.
+    """
+
+    def __init__(self, message: str, spend: Spend | None = None) -> None:
+        super().__init__(message)
+        self.spend = spend or Spend()
 
 
 class Analyst:
@@ -97,16 +162,18 @@ class Analyst:
     def __repr__(self) -> str:
         return f"Analyst(enabled={self.enabled}, effort={self._effort!r})"
 
-    async def analyze(self, row) -> str:
+    async def analyze(self, row) -> AnalysisResult:
         if self._client is None:
             raise AnalysisError("не задан ANTHROPIC_API_KEY — разбор недоступен")
 
         prompt = _build_prompt(row)
         messages: list[dict] = [{"role": "user", "content": prompt}]
+        spend = Spend()
 
         try:
             # web_fetch может вернуть pause_turn: сервер приостанавливает ход,
-            # чтобы мы продолжили его тем же запросом.
+            # чтобы мы продолжили его тем же запросом. Каждый ответ оплачен
+            # отдельно, поэтому usage складываем по всем итерациям.
             for _ in range(4):
                 response = await self._client.messages.create(
                     model=MODEL,
@@ -117,24 +184,34 @@ class Analyst:
                     tools=[WEB_FETCH_TOOL],
                     messages=messages,
                 )
+                spend.add(response.usage)
                 if response.stop_reason != "pause_turn":
                     break
                 messages.append({"role": "assistant", "content": response.content})
         except anthropic.APIStatusError as exc:
             log.warning("разбор не удался: %s", exc)
-            raise AnalysisError(f"API вернул {exc.status_code}") from exc
+            raise AnalysisError(f"API вернул {exc.status_code}", spend) from exc
         except anthropic.APIConnectionError as exc:
-            raise AnalysisError("не достучался до API") from exc
+            raise AnalysisError("не достучался до API", spend) from exc
 
         if response.stop_reason == "refusal":
-            raise AnalysisError("модель отказалась разбирать этот ассет")
+            raise AnalysisError("модель отказалась разбирать этот ассет", spend)
 
         text = "\n".join(
             block.text.strip() for block in response.content if block.type == "text"
         ).strip()
         if not text:
-            raise AnalysisError("модель вернула пустой ответ")
-        return text
+            raise AnalysisError("модель вернула пустой ответ", spend)
+
+        log.info(
+            "разбор %s: %.4f$ (%d вход, %d выход, %d переходов по ссылкам)",
+            row["asset_id"],
+            spend.usd,
+            spend.input_tokens,
+            spend.output_tokens,
+            spend.fetches,
+        )
+        return AnalysisResult(text=text, spend=spend)
 
 
 def _build_prompt(row) -> str:

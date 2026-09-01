@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS items (
     up_vote_percent INTEGER NOT NULL DEFAULT 0,
     tech            TEXT NOT NULL DEFAULT '{}',
     analysis        TEXT,
+    analysis_cost   REAL NOT NULL DEFAULT 0,
     thumb_url       TEXT,
     discovered_at   TEXT NOT NULL,
     status          TEXT NOT NULL DEFAULT 'new'
@@ -72,6 +73,7 @@ class Database:
         ("up_vote_percent", "INTEGER NOT NULL DEFAULT 0"),
         ("tech", "TEXT NOT NULL DEFAULT '{}'"),
         ("analysis", "TEXT"),
+        ("analysis_cost", "REAL NOT NULL DEFAULT 0"),
     )
 
     async def _migrate(self) -> None:
@@ -162,13 +164,38 @@ class Database:
         )
         await self.conn.commit()
 
-    async def set_analysis(self, asset_id: int, text: str) -> None:
+    async def set_analysis(self, asset_id: int, text: str, cost: float) -> None:
         """Разбор кешируется: повторное нажатие кнопки не должно снова
         оплачиваться запросом к модели."""
         await self.conn.execute(
-            "UPDATE items SET analysis = ? WHERE asset_id = ?", (text, asset_id)
+            "UPDATE items SET analysis = ?, analysis_cost = ? WHERE asset_id = ?",
+            (text, cost, asset_id),
         )
         await self.conn.commit()
+
+    async def add_spend(self, cost: float, tokens: int, counted: bool = True) -> None:
+        """Пожизненные счётчики расходов в settings.
+
+        Отдельно от items.analysis_cost: строку могут вычистить из очереди, а
+        потраченные деньги от этого никуда не денутся. `counted=False` — для
+        сорвавшихся разборов: токены оплачены, но разбора не случилось.
+        """
+        if cost <= 0 and tokens <= 0:
+            return
+        spent = float(await self.get_setting("spend_usd", "0") or 0) + cost
+        total_tokens = int(await self.get_setting("spend_tokens", "0") or 0) + tokens
+        await self.set_setting("spend_usd", f"{spent:.6f}")
+        await self.set_setting("spend_tokens", str(total_tokens))
+        if counted:
+            calls = int(await self.get_setting("spend_calls", "0") or 0) + 1
+            await self.set_setting("spend_calls", str(calls))
+
+    async def spend_summary(self) -> dict[str, float]:
+        return {
+            "usd": float(await self.get_setting("spend_usd", "0") or 0),
+            "tokens": int(await self.get_setting("spend_tokens", "0") or 0),
+            "calls": int(await self.get_setting("spend_calls", "0") or 0),
+        }
 
     async def set_status(self, asset_id: int, status: str) -> None:
         await self.conn.execute("UPDATE items SET status = ? WHERE asset_id = ?", (status, asset_id))
