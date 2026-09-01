@@ -63,7 +63,7 @@ def load_settings() -> Settings:
         api_key=os.getenv("ROBLOX_API_KEY", "").strip(),
         data_dir=data_dir,
         poll_interval_min=max(1, _int("POLL_INTERVAL_MIN", 15)),
-        batch_size=max(1, min(_int("BATCH_SIZE", 10), 30)),
+        batch_size=max(1, min(_int("BATCH_SIZE", 1), 30)),
         max_queue=max(50, _int("MAX_QUEUE", 2000)),
         # 0 = не фильтровать по возрасту.
         max_age_days=max(0, _int("MAX_AGE_DAYS", 0)),

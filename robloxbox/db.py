@@ -14,19 +14,22 @@ log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
-    asset_id      INTEGER PRIMARY KEY,
-    category      TEXT NOT NULL,
-    name          TEXT NOT NULL,
-    creator       TEXT NOT NULL,
-    create_time   TEXT,
-    update_time   TEXT,
-    price         REAL NOT NULL DEFAULT 0,
-    currency      TEXT NOT NULL DEFAULT 'USD',
-    category_path TEXT NOT NULL DEFAULT '',
-    up_votes      INTEGER NOT NULL DEFAULT 0,
-    thumb_url     TEXT,
-    discovered_at TEXT NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'new'
+    asset_id        INTEGER PRIMARY KEY,
+    category        TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    creator         TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    create_time     TEXT,
+    update_time     TEXT,
+    price           REAL NOT NULL DEFAULT 0,
+    currency        TEXT NOT NULL DEFAULT 'USD',
+    category_path   TEXT NOT NULL DEFAULT '',
+    up_votes        INTEGER NOT NULL DEFAULT 0,
+    down_votes      INTEGER NOT NULL DEFAULT 0,
+    up_vote_percent INTEGER NOT NULL DEFAULT 0,
+    thumb_url       TEXT,
+    discovered_at   TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'new'
 );
 -- Выдача идёт "сначала самое свежее", отбор — по статусу.
 CREATE INDEX IF NOT EXISTS idx_items_queue ON items(status, create_time DESC);
@@ -54,8 +57,25 @@ class Database:
         # WAL: поллер пишет параллельно с тем, как бот читает очередь.
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
         await self._conn.commit()
         log.info("база готова: %s", self._path)
+
+    # Колонки, добавленные после первого релиза. CREATE TABLE IF NOT EXISTS их
+    # не подтянет — базу на Railway надо доводить руками.
+    _ADDED_COLUMNS = (
+        ("description", "TEXT NOT NULL DEFAULT ''"),
+        ("down_votes", "INTEGER NOT NULL DEFAULT 0"),
+        ("up_vote_percent", "INTEGER NOT NULL DEFAULT 0"),
+    )
+
+    async def _migrate(self) -> None:
+        cursor = await self.conn.execute("PRAGMA table_info(items)")
+        existing = {row["name"] for row in await cursor.fetchall()}
+        for column, decl in self._ADDED_COLUMNS:
+            if column not in existing:
+                await self.conn.execute(f"ALTER TABLE items ADD COLUMN {column} {decl}")
+                log.info("миграция: добавлена колонка %s", column)
 
     async def close(self) -> None:
         if self._conn:
@@ -85,21 +105,25 @@ class Database:
                 a.category,
                 a.name[:300],
                 a.creator_name[:100],
+                a.description[:2000],
                 a.create_time.isoformat() if a.create_time else None,
                 a.update_time.isoformat() if a.update_time else None,
                 a.price,
                 a.currency,
                 a.category_path,
                 a.up_votes,
+                a.down_votes,
+                a.up_vote_percent,
                 now,
             )
             for a in assets
         ]
         cursor = await self.conn.executemany(
             """INSERT OR IGNORE INTO items
-               (asset_id, category, name, creator, create_time, update_time,
-                price, currency, category_path, up_votes, discovered_at, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,'new')""",
+               (asset_id, category, name, creator, description, create_time, update_time,
+                price, currency, category_path, up_votes, down_votes, up_vote_percent,
+                discovered_at, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'new')""",
             rows,
         )
         await self.conn.commit()

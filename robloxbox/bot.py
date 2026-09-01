@@ -28,10 +28,13 @@ router = Router()
 
 # Телеграм режет примерно на 20 сообщениях в минуту в один чат.
 SEND_DELAY = 0.4
+# Лимиты телеграма: подпись под фото — 1024 символа, обычное сообщение — 4096.
+CAPTION_LIMIT = 1024
+MESSAGE_LIMIT = 4096
 
 HELP = """<b>Что умею</b>
 
-/next — прислать пачку новых ассетов (сначала самые свежие)
+/next — следующий ассет (сначала самые свежие)
 /stats — сколько в очереди, сохранено, пропущено
 /cats — какие типы ассетов собирать
 /fresh — фильтр по возрасту ассета
@@ -57,17 +60,52 @@ def _fmt_date(raw: str | None) -> str:
         return "дата неизвестна"
 
 
-def _caption(row: aiosqlite.Row) -> str:
+def _fmt_votes(up: int, down: int, percent: int) -> str:
+    total = up + down
+    if not total:
+        return "🤷 без оценок"
+    # percent приходит из API; если он почему-то пуст, считаем сами.
+    pct = percent or round(up * 100 / total)
+    face = "🔥" if pct >= 80 else "👍" if pct >= 50 else "👎"
+    return f"{face} {pct}% ({up}↑ {down}↓)"
+
+
+def _clean_description(raw: str) -> str:
+    """Схлопывает пустые строки: в описаниях их бывает по десятку подряд."""
+    lines = [line.strip() for line in (raw or "").splitlines()]
+    out: list[str] = []
+    for line in lines:
+        if not line and (not out or not out[-1]):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def _caption(row: aiosqlite.Row, limit: int = CAPTION_LIMIT) -> str:
     name = html.escape(row["name"])[:150]
     creator = html.escape(row["creator"])
     label = C.CATEGORY_LABELS.get(row["category"], row["category"])
-    votes = f" · 👍 {row['up_votes']}" if row["up_votes"] else ""
-    return (
+
+    head = (
         f"<b>{name}</b>\n"
-        f"{label} · 👤 {creator}{votes}\n"
+        f"{label} · 👤 {creator}\n"
+        f"{_fmt_votes(row['up_votes'], row['down_votes'], row['up_vote_percent'])}\n"
         f"{_fmt_price(row['price'], row['currency'])} · 📅 {_fmt_date(row['create_time'])}\n"
         f"<code>{row['asset_id']}</code>"
     )
+
+    description = _clean_description(row["description"])
+    if not description:
+        return head
+
+    # Экранируем до обрезки, иначе можно разрубить HTML-сущность пополам.
+    escaped = html.escape(description)
+    budget = limit - len(head) - 2
+    if budget < 40:
+        return head
+    if len(escaped) > budget:
+        escaped = escaped[: budget - 1].rsplit(" ", 1)[0] + "…"
+    return f"{head}\n\n{escaped}"
 
 
 def _keyboard(asset_id: int) -> InlineKeyboardMarkup:
@@ -102,20 +140,29 @@ def _done_keyboard(asset_id: int, text: str) -> InlineKeyboardMarkup:
 
 
 async def _send_card(bot: Bot, chat_id: int, row: aiosqlite.Row) -> None:
-    caption = _caption(row)
     keyboard = _keyboard(row["asset_id"])
     thumb = row["thumb_url"]
 
     if thumb:
         try:
-            await bot.send_photo(chat_id, photo=thumb, caption=caption, reply_markup=keyboard)
+            await bot.send_photo(
+                chat_id,
+                photo=thumb,
+                caption=_caption(row, CAPTION_LIMIT),
+                reply_markup=keyboard,
+            )
             return
         except TelegramBadRequest as exc:
             # Телеграм иногда не может скачать картинку с rbxcdn — не беда,
-            # карточка уходит текстом.
+            # карточка уходит текстом, где и описание влезает целиком.
             log.info("превью %s не отправилось (%s), шлю текстом", row["asset_id"], exc)
 
-    await bot.send_message(chat_id, caption, reply_markup=keyboard, disable_web_page_preview=True)
+    await bot.send_message(
+        chat_id,
+        _caption(row, MESSAGE_LIMIT),
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
 
 
 @router.message(CommandStart())
@@ -211,7 +258,7 @@ async def cmd_stats(message: Message, db: Database, cfg: Settings) -> None:
         f"⏭ пропущено: {stats['skipped']}\n"
         f"— всего в базе: {stats['total']}\n\n"
         f"Фильтр по возрасту: {age_line}\n"
-        f"Пачка: {cfg.batch_size} · опрос каждые {cfg.poll_interval_min} мин."
+        f"За один /next: {cfg.batch_size} · опрос каждые {cfg.poll_interval_min} мин."
     )
 
 

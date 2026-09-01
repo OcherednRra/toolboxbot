@@ -46,6 +46,11 @@ class Asset:
     category_path: str
     up_votes: int
     down_votes: int
+    up_vote_percent: int
+
+    @property
+    def vote_count(self) -> int:
+        return self.up_votes + self.down_votes
 
     @property
     def store_url(self) -> str:
@@ -303,6 +308,11 @@ def _parse_asset(entry: dict, fallback_category: str) -> Asset | None:
         category_path=asset.get("categoryPath") or "",
         up_votes=int(voting.get("upVotes") or 0),
         down_votes=int(voting.get("downVotes") or 0),
+        # Без единого голоса Roblox всё равно присылает 100 — считать это
+        # рейтингом нельзя, поэтому обнуляем и решаем по vote_count.
+        up_vote_percent=int(voting.get("upVotePercent") or 0)
+        if (voting.get("upVotes") or voting.get("downVotes"))
+        else 0,
     )
 
 

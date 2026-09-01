@@ -19,7 +19,7 @@ from .roblox import ToolboxClient
 log = logging.getLogger("robloxbox")
 
 COMMANDS = [
-    BotCommand(command="next", description="Прислать пачку новых ассетов"),
+    BotCommand(command="next", description="Следующий ассет"),
     BotCommand(command="stats", description="Очередь и статистика"),
     BotCommand(command="cats", description="Какие типы ассетов собирать"),
     BotCommand(command="fresh", description="Фильтр по возрасту ассета"),
