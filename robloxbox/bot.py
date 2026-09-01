@@ -126,11 +126,10 @@ def _fmt_tech(raw: str, category: str = "") -> str:
             audio_parts.append(f"⏱ {_fmt_duration(int(tech['duration']))}")
         if tech.get("artist"):
             audio_parts.append(f"🎤 {html.escape(str(tech['artist']))[:60]}")
-        kind = " / ".join(
-            str(tech[key]) for key in ("audio_type", "genre") if tech.get(key)
-        )
-        if kind:
-            audio_parts.append(f"🎵 {html.escape(kind)[:40]}")
+        if tech.get("genre"):
+            audio_parts.append(f"🎵 жанр: {html.escape(str(tech['genre']))[:30]}")
+        if tech.get("audio_type"):
+            audio_parts.append(f"🎧 {html.escape(str(tech['audio_type']))[:20]}")
         return " · ".join(audio_parts)
 
     parts: list[str] = []

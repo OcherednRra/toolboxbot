@@ -158,6 +158,7 @@ class ToolboxClient:
         sort_direction: str = "Ascending",
         page_token: str | None = None,
         page_size: int = C.MAX_PAGE_SIZE,
+        free_only: bool = False,
     ) -> tuple[list[Asset], str | None]:
         """Возвращает (ассеты, токен следующей страницы)."""
         body: dict[str, object] = {
@@ -165,6 +166,10 @@ class ToolboxClient:
             "sortCategory": sort_category,
             "sortDirection": sort_direction,
         }
+        if free_only:
+            # Отсекаем платное на стороне Roblox: дешевле, чем выгребать и
+            # выбрасывать у себя. Проверено — работает для всех категорий.
+            body["maxPriceCents"] = 0
         # API требует ровно одно из двух: searchCategoryType или categoryPath.
         if category_path:
             body["categoryPath"] = category_path

@@ -201,6 +201,27 @@ class Database:
         await self.conn.execute("UPDATE items SET status = ? WHERE asset_id = ?", (status, asset_id))
         await self.conn.commit()
 
+    async def purge_disabled(self, enabled: list[str]) -> int:
+        """Убирает из очереди категории, которые больше не собираем."""
+        if not enabled:
+            return 0
+        placeholders = ",".join("?" * len(enabled))
+        cursor = await self.conn.execute(
+            f"DELETE FROM items WHERE status = 'new' AND category NOT IN ({placeholders})",
+            enabled,
+        )
+        await self.conn.commit()
+        return cursor.rowcount or 0
+
+    async def purge_paid(self) -> int:
+        """Выкидывает платное из очереди. Уже показанное и сохранённое не
+        трогаем — это история, её переписывать незачем."""
+        cursor = await self.conn.execute(
+            "DELETE FROM items WHERE status = 'new' AND price > 0"
+        )
+        await self.conn.commit()
+        return cursor.rowcount or 0
+
     async def trim_queue(self, max_queue: int) -> int:
         """Держит очередь в рамках: выкидывает самые старые непоказанные."""
         cursor = await self.conn.execute(

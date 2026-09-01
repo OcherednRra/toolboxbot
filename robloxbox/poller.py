@@ -88,6 +88,7 @@ async def run_one_cycle(cfg: Settings, db: Database, client: ToolboxClient, path
                     sort_category=probe["sort_category"],  # type: ignore[arg-type]
                     sort_direction=probe["sort_direction"],  # type: ignore[arg-type]
                     page_token=page_token,
+                    free_only=cfg.free_only,
                 )
             except (RobloxError, OSError) as exc:
                 log.warning("срез %s сломался: %s", probe["label"], exc)
@@ -109,6 +110,12 @@ async def run_one_cycle(cfg: Settings, db: Database, client: ToolboxClient, path
                 for asset in assets:
                     asset.category = _category_from_type_id(asset.asset_type_id, asset.category)
 
+            # Страховка на случай, если фильтр по цене что-то пропустит, и
+            # отсев чужих категорий: обход по categoryPath приносит что попало.
+            if cfg.free_only:
+                assets = [a for a in assets if a.is_free]
+            assets = [a for a in assets if a.category in categories]
+
             new_count = await db.insert_assets(assets)
             added += new_count
             log.info("срез %s: +%d новых из %d", probe["label"], new_count, len(assets))
@@ -124,6 +131,11 @@ async def run_one_cycle(cfg: Settings, db: Database, client: ToolboxClient, path
     missing = await db.missing_thumbnails(limit=200)
     if missing:
         await db.set_thumbnails(await client.thumbnails(missing))
+
+    # Категории могли выключить через /cats уже после того, как очередь набралась.
+    disabled = await db.purge_disabled(categories)
+    if disabled:
+        log.info("выкинуто из очереди по выключенным категориям: %d", disabled)
 
     dropped = await db.trim_queue(cfg.max_queue)
     if dropped:
@@ -152,6 +164,11 @@ async def poller_loop(cfg: Settings, db: Database, client: ToolboxClient) -> Non
     """Бесконечный цикл сбора. Ошибки логируются и не роняют процесс."""
     paths = await client.category_paths()
     log.info("категорий для обхода: %d", len(paths))
+
+    if cfg.free_only:
+        # Очередь могла накопиться до того, как фильтр включили.
+        dropped = await db.purge_paid()
+        log.info("собираем только бесплатное; выкинуто платных из очереди: %d", dropped)
 
     while True:
         try:

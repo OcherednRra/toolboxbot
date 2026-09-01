@@ -33,6 +33,7 @@ class Settings:
     batch_size: int
     max_queue: int
     max_age_days: int
+    free_only: bool = True
     anthropic_key: str = ""
     analysis_effort: str = "medium"
     categories: tuple[str, ...] = field(default=SEARCH_CATEGORIES)
@@ -53,7 +54,7 @@ def load_settings() -> Settings:
         if not cats:
             raise SystemExit(f"CATEGORIES содержит только неизвестные значения. Допустимы: {', '.join(SEARCH_CATEGORIES)}")
     else:
-        cats = ("Model", "Decal", "Audio", "MeshPart", "Plugin")
+        cats = ("Model", "Decal", "Audio", "Plugin")
 
     data_dir = Path(os.getenv("DATA_DIR", "./data")).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -69,6 +70,8 @@ def load_settings() -> Settings:
         max_queue=max(50, _int("MAX_QUEUE", 2000)),
         # 0 = не фильтровать по возрасту.
         max_age_days=max(0, _int("MAX_AGE_DAYS", 0)),
+        # По умолчанию собираем только бесплатное.
+        free_only=os.getenv("FREE_ONLY", "true").strip().lower() not in ("0", "false", "no"),
         anthropic_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
         analysis_effort=os.getenv("ANALYSIS_EFFORT", "medium").strip().lower() or "medium",
         categories=cats,
