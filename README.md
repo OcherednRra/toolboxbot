@@ -1,5 +1,7 @@
 # Toolbox Bot
 
+*Telegram bot that sends free assets from the Roblox Creator Store in batches and saves the ones you pick to your Roblox account (Studio → Toolbox → Saved).*
+
 Телеграм-бот, который присылает пачками ассеты из Roblox Creator Store.
 Под каждой карточкой кнопка 🔖 — ассет улетает в **Saved** твоего аккаунта
 Roblox и сразу виден в Studio → Toolbox → Saved.
